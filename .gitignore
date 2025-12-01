@@ -28,3 +28,7 @@ runs/
 Thumbs.db
 .vscode/
 .idea/
+
+# Ignore Zenbot generated images
+zenbot_result_*.jpg
+snapshots/

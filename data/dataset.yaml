@@ -1,7 +1,0 @@
-path: /content/data
-train: train/images
-val: valid/images
-test: test/images
-
-nc: 8
-names: ['aa_battery', 'charger_adapter', 'eraser', 'glue_stick', 'highlighter', 'pen', 'sharpener', 'stapler']
