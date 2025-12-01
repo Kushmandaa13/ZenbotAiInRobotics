@@ -1,0 +1,17 @@
+names:
+  - aa_battery
+  - charger_adapter
+  - eraser
+  - glue_stick
+  - highlighter
+  - pen
+  - sharpener
+  - stapler
+
+nc: 8
+
+path: /content/dofbot-desk-objects-3
+
+train: /content/dofbot-desk-objects-3/train/images
+val: /content/dofbot-desk-objects-3/valid/images
+test: /content/dofbot-desk-objects-3/test/images
