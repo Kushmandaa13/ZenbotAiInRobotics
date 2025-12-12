@@ -1,528 +1,767 @@
+#!/usr/bin/env python3
 import time
-import numpy as np
-from typing import Tuple, List, Dict
+from typing import Dict, Tuple, Optional, List
+
+#import DOFBOT library
+try:
+    from Arm_Lib import Arm_Device
+    ARM_LIB_AVAILABLE = True
+except ImportError:
+    ARM_LIB_AVAILABLE = False
+    print("Arm_Lib not found - running in SIMULATION mode")
 
 
 class ArmController:
-    """Control DOFBOT 6-DOF robotic arm for desk tidying operations."""
+    # BOARD CONFIGURATION
     
-    # Joint angle limits in degrees
-    JOINT_LIMITS = {
-        'j1': (-150, 150),   # Base rotation
-        'j2': (-90, 90),     # Shoulder
-        'j3': (-90, 90),     # Elbow
-        'j4': (-90, 90),     # Wrist pitch
-        'j5': (-90, 90),     # Wrist roll
-        'j6': (-180, 180),   # Wrist yaw (gripper rotation)
+    MAP_WIDTH_CM = 28.7
+    MAP_HEIGHT_CM = 30.5
+    TRAY_SIZE_CM = 7.0
+
+    RAINBOW_ORDER = [
+        "red", "orange", "yellow", "green",
+        "blue", "indigo", "violet", "neutral"
+    ]
+    # HARDCODED SERVO POSITIONS
+    
+    HOME = (90, 90, 90, 90, 90, 90)
+    READY = (90, 70, 80, 50, 90, 60)  # Gripper open (60)
+    SAFE_TRAVEL = (90, 80, 90, 45, 90, 90)
+
+    # GRIPPER SETTINGS
+    GRIPPER_OPEN = 60
+    GRIPPER_CLOSED = 180
+
+    GRIPPER_BY_OBJECT = {
+        'aa_battery': 85,
+        'charger_adapter': 115,
+        'eraser': 155,
+        'glue_stick': 158,
+        'highlighter': 148,
+        'pen': 180,
+        'sharpener': 144,
+        'stapler': 160
     }
-    
-    # Safe neutral position
-    HOME_POSITION = {
-        'j1': 0, 'j2': 0, 'j3': 0,
-        'j4': 0, 'j5': 0, 'j6': 0,
+
+    # TRAY POSITIONS 
+    TRAY_POSITIONS = {
+        "red": (108, 0, 80, 80, 90, 149),
+        "orange": (96, 0, 81, 80, 90, 88),
+        "yellow": (83, 0, 80, 84, 90, 135),
+        "green": (70, 0, 83, 75, 90, 134),
+        "blue": (112, 48, 25, 65, 90, 126),
+        "indigo": (99, 30, 75, 20, 90, 150),
+        "violet": (81, 30, 70, 30, 90, 143),
+        "neutral": (66, 33, 60, 40, 90, 110),
     }
-    
-    # Color to bin position mapping (8 bins for rainbow + neutrals)
-    # Coordinates in cm: (x, y, z)
-    BIN_POSITIONS = {
-        # Rainbow bins (Row 1)
-        'red': (20, -21, 5),      # Bin 1
-        'orange': (20, -14, 5),   # Bin 2
-        'yellow': (20, -7, 5),    # Bin 3
-        'green': (20, 0, 5),      # Bin 4
-        # Rainbow bins (Row 2)
-        'blue': (20, 7, 5),       # Bin 5
-        'indigo': (20, 14, 5),    # Bin 6
-        'violet': (20, 21, 5),    # Bin 7
-        # Neutral/misc bin (shared)
-        'white': (20, 28, 5),     # Bin 8
-        'black': (20, 28, 5),
-        'cream': (20, 28, 5),
-        'maroon': (20, 28, 5),
-        'unknown': (20, 28, 5),
+
+    TRAY_HOVER_POSITIONS = {
+        "red": (108, 5, 80, 80, 90, 139),
+        "orange": (96, 0, 81, 90, 90, 140),
+        "yellow": (83, 0, 80, 90, 90, 180),
+        "green": (70, 0, 78, 90, 90, 180),
+        "blue": (112, 63, 0, 85, 90, 180),
+        "indigo": (99, 35, 75, 20, 90, 180),
+        "violet": (80, 35, 70, 30, 90, 180),
+        "neutral": (66, 40, 60, 40, 90, 180),
     }
-    
-    def __init__(self, port: str = None, baudrate: int = 115200):
-        """
-        Initialize DOFBOT arm controller.
-        
-        Args:
-            port: Serial port for arm connection (e.g., 'COM3', '/dev/ttyUSB0')
-            baudrate: Serial communication baud rate
-        """
-        self.port = port
-        self.baudrate = baudrate
-        self.current_position = self.HOME_POSITION.copy()
-        self.gripper_open = True
+
+    # PICKUP ZONES 
+    PICKUP_ZONES = {
+        1: {
+            'u_range': (0, 7),
+            'v_range': (0, 8.1),
+            'hover': (130, 91, 5, 15, 180, 105),
+            'pickup': (130, 81, 5, 15, 180, 155),
+        },
+        2: {
+            'u_range': (7, 14),
+            'v_range': (0, 8.2),
+            'hover': (100, 90, 10, 0, 115, 110),
+            'pickup': (100, 75, 10, 0, 115, 150),
+        },
+        3: {
+            'u_range': (14, 21),
+            'v_range': (0, 8.3),
+            'hover': (70, 85, 15, 0, 45, 115),
+            'pickup': (65, 80, 15, 3, 45, 145),
+        },
+        4: {
+            'u_range': (21, 28.7),
+            'v_range': (0, 8.4),
+            'hover': (40, 55, 45, 0, 10, 55),
+            'pickup': (40, 55, 45, 0, 10, 115),
+        },
+        5: {
+            'u_range': (0, 7),
+            'v_range': (8.1, 16.3),
+            'hover': (116, 36, 78, 1, 80, 40),
+            'pickup': (116, 31, 78, 1, 80, 85),
+        },
+        6: {
+            'u_range': (7, 14),
+            'v_range': (8.2, 16.3),
+            'hover': (94, 65, 29, 22, 150, 115),
+            'pickup': (94, 65, 29, 22, 150, 180),
+        },
+        7: {
+            'u_range': (14, 21),
+            'v_range': (8.3, 16.4),
+            'hover': (78, 70, 29, 22, 115, 105),
+            'pickup': (78, 65, 29, 22, 115, 158),
+        },
+        8: {
+            'u_range': (21, 28.7),
+            'v_range': (8.3, 16.5),
+            'hover': (48, 60, 39, 32, 180, 63),
+            'pickup': (48, 60, 39, 32, 180, 160),
+        },
+    }
+
+    # TIMING
+
+    MOVE_TIME_FAST = 1000        
+    MOVE_TIME_NORMAL = 1500      
+    MOVE_TIME_SLOW = 2000        
+    MOVE_TIME_VERY_SLOW = 2500  
+
+    GRIPPER_TIME = 800           
+    SETTLE_TIME = 0.5         
+
+    # INITIALIZATION
+
+    def __init__(self, port: str = None, simulation: bool = False):
+        self.simulation = simulation or not ARM_LIB_AVAILABLE
         self.connected = False
-        self.serial_conn = None
+        self.arm = None
+        self.current_position = self.HOME
         
-        print("🤖 ArmController initialized")
-        print(f"   Port: {port or 'Not specified'}")
-        print(f"   Baudrate: {baudrate}")
-    
+        # Statistics
+        self.operations_count = 0
+        self.successful_picks = 0
+        self.failed_picks = 0
+
+        print("=" * 60)
+        print("DOFBOT Arm Controller (FIXED - Gripper Preserved)")
+        print("=" * 60)
+        
+        if self.simulation:
+            print("Running in SIMULATION mode")
+        else:
+            print("Arm_Lib available")
+
     def connect(self) -> bool:
-        """
-        Establish connection to DOFBOT via serial port.
-        
-        Returns:
-            True if connection successful, False otherwise
-        """
-        try:
-            # Import serial library
-            import serial
-            
-            if not self.port:
-                print("⚠️  No port specified. Running in simulation mode.")
-                self.connected = True
-                return True
-            
-            # Establish serial connection
-            self.serial_conn = serial.Serial(
-                port=self.port,
-                baudrate=self.baudrate,
-                timeout=1
-            )
-            
+        if self.simulation:
+            print("[SIM] Connected to simulated arm")
             self.connected = True
-            print(f"✅ Connected to DOFBOT on {self.port}")
-            
-            # Initialize to home position
-            time.sleep(0.5)
-            self.move_home()
-            
             return True
+
+        try:
+            print("Connecting to DOFBOT...")
+            self.arm = Arm_Device()
+            time.sleep(0.5)
             
-        except ImportError:
-            print("⚠️  pyserial not installed. Running in simulation mode.")
+            self.move_to_position(self.HOME, time_ms=1000)
+            time.sleep(1)
+            
             self.connected = True
+            print("Connected to DOFBOT successfully")
             return True
             
         except Exception as e:
-            print(f"❌ Connection failed: {e}")
-            print("⚠️  Running in simulation mode.")
+            print(f"Connection failed: {e}")
+            print("Switching to simulation mode")
+            self.simulation = True
             self.connected = True
-            return False
-    
+            return True
+
     def disconnect(self):
-        """Disconnect from DOFBOT."""
-        if self.serial_conn:
+        if self.connected:
+            print("Disconnecting...")
             try:
-                # Return to home before disconnecting
                 self.move_home()
                 time.sleep(0.5)
-                self.serial_conn.close()
-                print("✅ Disconnected from DOFBOT")
+            except:
+                pass
+            self.connected = False
+            print("Disconnected")
+
+    # LOW-LEVEL MOVEMENT
+
+    def move_to_position(self, position: Tuple[int, ...], 
+                         time_ms: int = None) -> bool:
+        """Move arm to specified servo position."""
+        if time_ms is None:
+            time_ms = self.MOVE_TIME_NORMAL
+
+        s1, s2, s3, s4, s5, s6 = position
+
+        # Clamp values
+        s1 = max(0, min(180, s1))
+        s2 = max(0, min(180, s2))
+        s3 = max(0, min(180, s3))
+        s4 = max(0, min(180, s4))
+        s5 = max(0, min(180, s5))
+        s6 = max(0, min(180, s6))
+
+        if self.simulation:
+            print(f"   [SIM] Move: ({s1}, {s2}, {s3}, {s4}, {s5}, {s6}) @ {time_ms}ms")
+        else:
+            try:
+                self.arm.Arm_serial_servo_write6(s1, s2, s3, s4, s5, s6, time_ms)
             except Exception as e:
-                print(f"⚠️  Disconnect warning: {e}")
-        
-        self.connected = False
-    
-    def send_command(self, command: str) -> bool:
-        """
-        Send command string to DOFBOT.
-        
-        Args:
-            command: Command string to send
-            
-        Returns:
-            True if command sent successfully
-        """
-        if not self.connected:
-            print("❌ Not connected to DOFBOT")
-            return False
-        
-        try:
-            if self.serial_conn:
-                # Send actual command via serial
-                self.serial_conn.write(f"{command}\n".encode())
-                print(f"📤 Sent: {command}")
-            else:
-                # Simulation mode - just log
-                print(f"🔶 [SIM] Command: {command}")
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ Command failed: {e}")
-            return False
-    
-    def validate_angles(self, angles: dict) -> bool:
-        """
-        Validate joint angles are within safe limits.
-        
-        Args:
-            angles: Dictionary of joint angles
-            
-        Returns:
-            True if all angles are valid
-        """
-        for joint, angle in angles.items():
-            if joint in self.JOINT_LIMITS:
-                min_angle, max_angle = self.JOINT_LIMITS[joint]
-                if not (min_angle <= angle <= max_angle):
-                    print(f"❌ Angle {angle}° out of range for {joint} "
-                          f"(valid: {min_angle}° to {max_angle}°)")
-                    return False
+                print(f"Movement error: {e}")
+                return False
+
+        time.sleep(time_ms / 1000.0 + self.SETTLE_TIME)
+        self.current_position = (s1, s2, s3, s4, s5, s6)
         return True
-    
-    def move_to_position(self, angles: dict, speed: float = 0.5, 
-                        wait: bool = True) -> bool:
-        """
-        Move arm to specified joint angles.
+
+     # Move arm keeping current gripper value.
+    def move_to_position_keep_gripper(self, position: Tuple[int, ...], 
+                                       time_ms: int = None) -> bool:
+   
+        current_grip = self.current_position[5]
+        s1, s2, s3, s4, s5, _ = position
+        new_position = (s1, s2, s3, s4, s5, current_grip)
+        return self.move_to_position(new_position, time_ms)
+
+    def move_single_servo(self, servo_id: int, angle: int, 
+                          time_ms: int = 500) -> bool:
+        angle = max(0, min(180, angle))
+
+        if self.simulation:
+            print(f"   [SIM] Servo {servo_id} → {angle}° @ {time_ms}ms")
+        else:
+            try:
+                self.arm.Arm_serial_servo_write(servo_id, angle, time_ms)
+            except Exception as e:
+                print(f"Servo {servo_id} error: {e}")
+                return False
+
+        time.sleep(time_ms / 1000.0 + 0.1)
         
-        Args:
-            angles: Dictionary of joint angles in degrees
-            speed: Movement speed factor (0-1)
-            wait: Whether to wait for movement to complete
-            
-        Returns:
-            True if movement successful
-        """
-        # Validate angles
-        if not self.validate_angles(angles):
-            return False
+        # Update internal position
+        pos_list = list(self.current_position)
+        pos_list[servo_id - 1] = angle
+        self.current_position = tuple(pos_list)
         
-        # Clamp speed
-        speed = max(0.1, min(1.0, speed))
-        
-        # Build command string
-        angle_str = ' '.join([f"{k}:{v}" for k, v in angles.items()])
-        command = f"MOVE {angle_str} SPEED:{speed}"
-        
-        # Send command
-        if self.send_command(command):
-            # Update current position
-            self.current_position.update(angles)
-            
-            # Wait for movement to complete
-            if wait:
-                delay = 1.0 / speed  # Longer delay for slower movements
-                time.sleep(delay)
-            
-            return True
-        
-        return False
-    
+        return True
+
     def move_home(self) -> bool:
-        """Move arm to safe home position."""
-        print("🏠 Moving to home position...")
-        return self.move_to_position(self.HOME_POSITION, speed=0.5)
+        """Move arm to home position."""
+        print(" Moving to HOME position...")
+        return self.move_to_position(self.HOME, self.MOVE_TIME_NORMAL)
+
+    def move_ready(self) -> bool:
+        print(" Moving to READY position...")
+        return self.move_to_position(self.READY, self.MOVE_TIME_NORMAL)
+
+    # GRIPPER CONTROL
+
+    def open_gripper(self, time_ms: int = None) -> bool:
+        if time_ms is None:
+            time_ms = self.GRIPPER_TIME
+        print(f" Opening gripper (value: {self.GRIPPER_OPEN})...")
+        return self.move_single_servo(6, self.GRIPPER_OPEN, time_ms)
+
+    def close_gripper(self, grip_value: int = None, time_ms: int = None) -> bool:
+        if grip_value is None:
+            grip_value = self.GRIPPER_CLOSED
+        if time_ms is None:
+            time_ms = self.GRIPPER_TIME
+        print(f" Closing gripper (value: {grip_value})...")
+        return self.move_single_servo(6, grip_value, time_ms)
+
+    def close_gripper_for_object(self, object_class: str) -> bool:
+        grip_value = self.GRIPPER_BY_OBJECT.get(object_class, self.GRIPPER_CLOSED)
+        print(f"Gripping {object_class} (grip: {grip_value})...")
+        return self.move_single_servo(6, grip_value, self.GRIPPER_TIME)
     
-    def open_gripper(self, delay: float = 0.5) -> bool:
-        """
-        Open gripper to release object.
-        
-        Args:
-            delay: Time to wait for gripper to open (seconds)
+    # ZONE-BASED PICKING
+
+    def get_zone_for_coordinates(self, u_map: float, v_map: float) -> int:
+        for zone_num, zone_data in self.PICKUP_ZONES.items():
+            u_min, u_max = zone_data['u_range']
+            v_min, v_max = zone_data['v_range']
             
-        Returns:
-            True if successful
-        """
-        if self.send_command("GRIPPER OPEN"):
-            self.gripper_open = True
-            print("✋ Gripper opened")
-            time.sleep(delay)
-            return True
-        return False
-    
-    def close_gripper(self, delay: float = 0.5) -> bool:
-        """
-        Close gripper to grasp object.
-        
-        Args:
-            delay: Time to wait for gripper to close (seconds)
+            if u_min <= u_map <= u_max and v_min <= v_map <= v_max:
+                return zone_num
             
-        Returns:
-            True if successful
-        """
-        if self.send_command("GRIPPER CLOSE"):
-            self.gripper_open = False
-            print("✊ Gripper closed")
-            time.sleep(delay)
-            return True
-        return False
-    
-    def pick_object(self, position: Tuple[float, float, float], 
-                   approach_height: float = 10) -> bool:
-        """
-        Pick up object from specified 3D position.
+        # Default fallback
+        print(f"Coordinates ({u_map:.1f}, {v_map:.1f}) outside defined zones")
+        return 6  
+
+   # Get hover and pickup positions for coordinates
+    def get_pickup_positions(self, u_map: float, v_map: float) -> Dict:
         
-        Args:
-            position: (x, y, z) coordinates in cm
-            approach_height: Height above object for safe approach (cm)
-            
-        Returns:
-            True if pick operation successful
-        """
-        x, y, z = position
-        print(f"🎯 Picking object at ({x:.1f}, {y:.1f}, {z:.1f}) cm")
+        zone = self.get_zone_for_coordinates(u_map, v_map)
+        zone_data = self.PICKUP_ZONES[zone]
         
-        # Step 1: Open gripper
-        if not self.open_gripper():
-            return False
+        print(f"Zone {zone} selected for ({u_map:.1f}, {v_map:.1f}) cm")
         
-        # Step 2: Move to approach position (above object)
-        approach_pos = (x, y, z + approach_height)
-        approach_angles = self.cartesian_to_angles(*approach_pos)
-        print(f"   ↓ Approaching from above...")
-        if not self.move_to_position(approach_angles, speed=0.4):
-            return False
-        
-        # Step 3: Lower to object
-        pick_angles = self.cartesian_to_angles(x, y, z)
-        print(f"   ↓ Lowering to object...")
-        if not self.move_to_position(pick_angles, speed=0.3):
-            return False
-        
-        # Step 4: Close gripper
-        print(f"   ✊ Grasping...")
-        if not self.close_gripper():
-            return False
-        
-        # Step 5: Lift object
-        print(f"   ↑ Lifting object...")
-        if not self.move_to_position(approach_angles, speed=0.4):
-            return False
-        
-        print("✅ Object picked successfully")
-        return True
-    
-    def place_object(self, position: Tuple[float, float, float],
-                    approach_height: float = 10) -> bool:
-        """
-        Place object at specified 3D position.
-        
-        Args:
-            position: (x, y, z) coordinates in cm
-            approach_height: Height above placement for safe approach (cm)
-            
-        Returns:
-            True if place operation successful
-        """
-        x, y, z = position
-        print(f"📦 Placing object at ({x:.1f}, {y:.1f}, {z:.1f}) cm")
-        
-        # Step 1: Move to approach position (above placement)
-        approach_pos = (x, y, z + approach_height)
-        approach_angles = self.cartesian_to_angles(*approach_pos)
-        print(f"   ↓ Approaching placement zone...")
-        if not self.move_to_position(approach_angles, speed=0.4):
-            return False
-        
-        # Step 2: Lower to placement position
-        place_angles = self.cartesian_to_angles(x, y, z)
-        print(f"   ↓ Lowering to bin...")
-        if not self.move_to_position(place_angles, speed=0.3):
-            return False
-        
-        # Step 3: Open gripper to release
-        print(f"   ✋ Releasing object...")
-        if not self.open_gripper():
-            return False
-        
-        # Step 4: Lift away
-        print(f"   ↑ Retracting...")
-        if not self.move_to_position(approach_angles, speed=0.4):
-            return False
-        
-        print("✅ Object placed successfully")
-        return True
-    
-    def pick_and_place(self, pick_pos: Tuple[float, float, float],
-                      place_pos: Tuple[float, float, float]) -> bool:
-        """
-        Complete pick-and-place operation from one location to another.
-        
-        Args:
-            pick_pos: Position to pick from (x, y, z) in cm
-            place_pos: Position to place at (x, y, z) in cm
-            
-        Returns:
-            True if operation successful
-        """
-        print("=" * 60)
-        print("🤖 PICK-AND-PLACE OPERATION STARTED")
-        print("=" * 60)
-        
+        return {
+            'hover': zone_data['hover'],
+            'pickup': zone_data['pickup'],
+            'zone': zone
+        }
+
+    # PICK AND PLACE OPERATIONS
+
+    def pick_object_at_coordinates(self, u_map: float, v_map: float,
+                                   object_class: str = None) -> bool:
+   
+        print(f"\n PICK OBJECT at ({u_map:.1f}, {v_map:.1f}) cm")
+        if object_class:
+            print(f"   Object: {object_class}")
+
         try:
-            # Return to home first
-            print("\n[1/5] Moving to home position...")
-            if not self.move_home():
+            # Get positions for this location
+            positions = self.get_pickup_positions(u_map, v_map)
+            hover_pos = positions['hover']
+            pickup_pos = positions['pickup']
+
+            # Open gripper first
+            print("   [1/5] Opening gripper...")
+            self.open_gripper()
+
+            #  Move to hover position with gripper open
+            print("   [2/5] Moving above object...")
+            h1, h2, h3, h4, h5, _ = hover_pos
+            hover_open = (h1, h2, h3, h4, h5, self.GRIPPER_OPEN)
+            if not self.move_to_position(hover_open, self.MOVE_TIME_NORMAL):
                 return False
+
+            #  Lower to pickup position with gripper still open
+            print("   [3/5] Lowering to object...")
+            p1, p2, p3, p4, p5, _ = pickup_pos
+            pickup_open = (p1, p2, p3, p4, p5, self.GRIPPER_OPEN)
+            if not self.move_to_position(pickup_open, self.MOVE_TIME_SLOW):
+                return False
+
+            #Close gripper to grab object
+            print("   [4/5] Grabbing object...")
+            if object_class:
+                self.close_gripper_for_object(object_class)
+            else:
+                self.close_gripper()
+            
+            # Extra delay to ensure grip is secure
             time.sleep(0.3)
-            
-            # Pick object
-            print("\n[2/5] Picking object...")
-            if not self.pick_object(pick_pos):
+
+            # Capture grip value AFTER closing
+            current_grip = self.current_position[5]
+            print(f"   ✓ Grip secured at value: {current_grip}")
+
+            # Lift object with closed gripper
+            print("   [5/5] Lifting object (keeping grip)...")
+            hover_with_grip = (h1, h2, h3, h4, h5, current_grip)
+            if not self.move_to_position(hover_with_grip, self.MOVE_TIME_NORMAL):
                 return False
-            time.sleep(0.3)
+
+            print("Object picked successfully!")
+            return True
+
+        except Exception as e:
+            print(f"Pick failed: {e}")
+            return False
+
+     # Get hover and pickup positions for coordinates
+    def place_in_tray(self, color: str) -> bool:
+        color = color.lower()
+        if color in ['white', 'black', 'cream', 'maroon', 'gray', 'grey', 'brown']:
+            print(f"  Mapping '{color}' to 'neutral' tray")
+            color = 'neutral'
+
+        if color not in self.TRAY_POSITIONS:
+            print(f" Unknown color '{color}', using 'neutral' tray")
+            color = 'neutral'
+
+        print(f"\n PLACE in {color.upper()} tray")
+
+        try:
+            hover_pos = self.TRAY_HOVER_POSITIONS[color]
+            tray_pos = self.TRAY_POSITIONS[color]
             
-            # Return to home with object
-            print("\n[3/5] Returning to home...")
-            if not self.move_home():
+            # Keep current grip during movement 
+            current_grip = self.current_position[5]
+            print(f"  Maintaining grip at value: {current_grip}")
+
+            # Move to safe travel position
+            print("   [1/5] Moving to safe position...")
+            s1, s2, s3, s4, s5, _ = self.SAFE_TRAVEL
+            safe_with_grip = (s1, s2, s3, s4, s5, current_grip)
+            if not self.move_to_position(safe_with_grip, self.MOVE_TIME_FAST):
                 return False
-            time.sleep(0.3)
-            
-            # Place object
-            print("\n[4/5] Placing object...")
-            if not self.place_object(place_pos):
+
+            # Move above tray
+            print(f"   [2/5] Moving above {color} tray...")
+            t1, t2, t3, t4, t5, _ = hover_pos
+            hover_with_grip = (t1, t2, t3, t4, t5, current_grip)
+            if not self.move_to_position(hover_with_grip, self.MOVE_TIME_NORMAL):
                 return False
-            time.sleep(0.3)
-            
-            # Final return to home
-            print("\n[5/5] Final return to home...")
-            if not self.move_home():
+
+            # Lower into tray 
+            print("   [3/5] Lowering into tray...")
+            d1, d2, d3, d4, d5, _ = tray_pos
+            tray_with_grip = (d1, d2, d3, d4, d5, current_grip)
+            if not self.move_to_position(tray_with_grip, self.MOVE_TIME_SLOW):
                 return False
-            
-            print("=" * 60)
-            print("✅ PICK-AND-PLACE COMPLETED SUCCESSFULLY")
+
+            # open gripper to release
+            print("   [4/5] Releasing object...")
+            self.open_gripper()
+
+            # Small delay after release
+            time.sleep(0.2)
+
+            # Lift  
+            print("   [5/5] Lifting away...")
+            h1, h2, h3, h4, h5, _ = hover_pos
+            hover_open = (h1, h2, h3, h4, h5, self.GRIPPER_OPEN)
+            if not self.move_to_position(hover_open, self.MOVE_TIME_NORMAL):
+                return False
+
+            print(f"  Object placed in {color} tray!")
+            return True
+
+        except Exception as e:
+            print(f"   Place failed: {e}")
+            return False
+
+    def pick_and_place(self, u_map: float, v_map: float, 
+                       color: str, object_class: str = None) -> bool:
+     #   complete pick-and-place operation
+        self.operations_count += 1
+        
+        print("\n" + "=" * 60)
+        print(f" PICK AND PLACE OPERATION #{self.operations_count}")
+        print("=" * 60)
+        print(f"   From: ({u_map:.1f}, {v_map:.1f}) cm")
+        print(f"   To: {color} tray")
+        if object_class:
+            print(f"   Object: {object_class}")
+        print("-" * 60)
+
+        try:
+            # Pick the object
+            if not self.pick_object_at_coordinates(u_map, v_map, object_class):
+                self.failed_picks += 1
+                print("PICK FAILED")
+                return False
+
+            # Place in tray
+            if not self.place_in_tray(color):
+                self.failed_picks += 1
+                print("PLACE FAILED")
+                self.open_gripper()  # Drop object safely
+                return False
+
+            # Return to home position
+            print("\n Returning to home position...")
+            self.move_to_position(self.HOME, self.MOVE_TIME_NORMAL)
+
+            self.successful_picks += 1
+            print("\n" + "=" * 60)
+            print(" PICK AND PLACE COMPLETE!")
             print("=" * 60)
             return True
-            
+
         except Exception as e:
-            print(f"\n❌ Operation failed: {e}")
-            print("🛑 Emergency stop triggered")
+            self.failed_picks += 1
+            print(f"\n Operation failed: {e}")
             self.emergency_stop()
             return False
-    
-    def cartesian_to_angles(self, x: float, y: float, z: float) -> dict:
-        """
-        Convert Cartesian coordinates to joint angles (inverse kinematics).
+
+    # VISION INTEGRATION
+
+    def pick_and_place_detection(self, detection: Dict) -> bool:
+        # Pick and place using detection from vision module
+        u_map, v_map = detection['map_coord_cm']
+        color = detection.get('color', 'neutral')
+        object_class = detection.get('class_name', None)
         
-        This is a simplified IK solution. For production use, implement
-        full DH parameter-based inverse kinematics for DOFBOT.
-        
-        Args:
-            x, y, z: Position in cm
-            
-        Returns:
-            Dictionary of joint angles in degrees
-        """
-        # Simplified inverse kinematics
-        # Base rotation (J1) - rotate towards target
-        j1 = int(np.degrees(np.arctan2(y, x)))
-        
-        # Calculate distance from base
-        r = np.sqrt(x**2 + y**2)
-        
-        # Shoulder angle (J2) - rough approximation
-        j2 = int(np.degrees(np.arctan2(z, r)))
-        
-        # Other joints - simplified
-        j3 = -j2  # Elbow compensates shoulder
-        j4 = 0    # Wrist pitch
-        j5 = 0    # Wrist roll
-        j6 = 0    # Gripper rotation
-        
-        angles = {
-            'j1': j1, 'j2': j2, 'j3': j3,
-            'j4': j4, 'j5': j5, 'j6': j6
-        }
-        
-        # Clamp to limits
-        for joint, angle in angles.items():
-            min_a, max_a = self.JOINT_LIMITS[joint]
-            angles[joint] = int(np.clip(angle, min_a, max_a))
-        
-        return angles
-    
-    def get_bin_position(self, color: str) -> Tuple[float, float, float]:
-        """
-        Get the 3D position of bin for specified color.
-        
-        Args:
-            color: Color name (e.g., 'red', 'blue', 'green')
-            
-        Returns:
-            (x, y, z) coordinates in cm
-        """
-        return self.BIN_POSITIONS.get(color.lower(), self.BIN_POSITIONS['unknown'])
-    
-    def emergency_stop(self) -> bool:
-        """
-        Emergency stop - halt all movement immediately.
-        
-        Returns:
-            True if stop successful
-        """
-        print("🛑 EMERGENCY STOP ACTIVATED!")
-        
-        # Send emergency stop command
-        success = self.send_command("ESTOP")
-        
-        # Open gripper for safety
-        if self.gripper_open == False:
-            self.open_gripper(delay=0.1)
-        
-        return success
-    
-    def test_movement(self):
-        """Test basic arm movements."""
+        return self.pick_and_place(u_map, v_map, color, object_class)
+
+    def sort_all_detections(self, detections: List[Dict]) -> Dict:
+        """Sort all detected objects by color."""
         print("\n" + "=" * 60)
-        print("🧪 TESTING ARM MOVEMENTS")
+        print(f" SORTING {len(detections)} OBJECTS")
         print("=" * 60)
-        
-        movements = [
-            ("Home position", self.HOME_POSITION),
-            ("Base rotation left", {'j1': -45, 'j2': 0, 'j3': 0, 'j4': 0, 'j5': 0, 'j6': 0}),
-            ("Base rotation right", {'j1': 45, 'j2': 0, 'j3': 0, 'j4': 0, 'j5': 0, 'j6': 0}),
-            ("Shoulder up", {'j1': 0, 'j2': 30, 'j3': 0, 'j4': 0, 'j5': 0, 'j6': 0}),
-            ("Home position", self.HOME_POSITION),
-        ]
-        
-        for name, angles in movements:
-            print(f"\n➡️  {name}")
-            self.move_to_position(angles, speed=0.5)
+
+        sorted_detections = sorted(detections, 
+                                   key=lambda d: d['map_coord_cm'][1])
+
+        successful = 0
+        failed = 0
+
+        for i, det in enumerate(sorted_detections):
+            print(f"\n--- Object {i+1}/{len(sorted_detections)} ---")
+            
+            if self.pick_and_place_detection(det):
+                successful += 1
+            else:
+                failed += 1
+            
+            time.sleep(0.3)
+
+        self.move_home()
+
+        print("\n" + "=" * 60)
+        print(" SORTING COMPLETE")
+        print(f"    Successful: {successful}")
+        print(f"    Failed: {failed}")
+        print("=" * 60)
+
+        return {'total': len(detections), 'successful': successful, 'failed': failed}
+
+   #Sort objects in rainbow order
+    def sort_by_rainbow_order(self, color_bins: Dict[str, List[Dict]]) -> Dict:
+        print("\n" + "=" * 60)
+        print(" RAINBOW SORTING")
+        print("=" * 60)
+
+        successful = 0
+        failed = 0
+        total = 0
+
+        for color in self.RAINBOW_ORDER:
+            if color not in color_bins or not color_bins[color]:
+                continue
+
+            print(f"\n{'='*40}")
+            print(f"Processing {color.upper()} objects...")
+            print(f"{'='*40}")
+
+            objects = sorted(color_bins[color], 
+                           key=lambda d: d['map_coord_cm'][1])
+
+            for det in objects:
+                total += 1
+                if self.pick_and_place_detection(det):
+                    successful += 1
+                else:
+                    failed += 1
+                time.sleep(0.3)
+
+        self.move_home()
+
+        print("\n" + "=" * 60)
+        print(" RAINBOW SORTING COMPLETE")
+        print(f"    Successful: {successful}/{total}")
+        print(f"   Failed: {failed}/{total}")
+        print("=" * 60)
+
+        return {'total': total, 'successful': successful, 'failed': failed}
+
+
+    # Emergency Stop
+    def emergency_stop(self):
+        """Emergency stop - open gripper and return home."""
+        print("\n EMERGENCY STOP!")
+        try:
+            self.open_gripper()
+            time.sleep(0.3)
+            self.move_home()
+        except:
+            pass
+
+    
+    # CALIBRATION & TESTING
+    # Interactive calibration 
+    def calibration_mode(self):
+        print("\n" + "=" * 60)
+        print("CALIBRATION MODE")
+        print("=" * 60)
+        print("\nControls:")
+        print("  1-6: Select servo")
+        print("  +/= : +5 degrees")
+        print("  -   : -5 degrees")
+        print("  [/] : ±1 degree (fine)")
+        print("  h   : HOME")
+        print("  r   : READY")
+        print("  o   : Open gripper")
+        print("  c   : Close gripper")
+        print("  p   : Print position")
+        print("  s   : Save note")
+        print("  q   : Quit")
+        print("=" * 60)
+
+        current_servo = 1
+        position = list(self.HOME)
+        saved_positions = []
+
+        self.move_to_position(tuple(position), 1000)
+
+        while True:
+            print(f"\n Position: ({position[0]}, {position[1]}, {position[2]}, "
+                  f"{position[3]}, {position[4]}, {position[5]})")
+            print(f"   Selected: S{current_servo} = {position[current_servo-1]}°")
+            
+            try:
+                cmd = input("Command: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                break
+
+            if cmd == 'q':
+                break
+            elif cmd == 'h':
+                position = list(self.HOME)
+                self.move_to_position(tuple(position), 800)
+            elif cmd == 'r':
+                position = list(self.READY)
+                self.move_to_position(tuple(position), 800)
+            elif cmd == 'o':
+                self.open_gripper()
+                position[5] = self.GRIPPER_OPEN
+            elif cmd == 'c':
+                self.close_gripper()
+                position[5] = self.GRIPPER_CLOSED
+            elif cmd == 'p':
+                pos_str = f"({position[0]}, {position[1]}, {position[2]}, {position[3]}, {position[4]}, {position[5]})"
+                print(f"\nCurrent position: {pos_str}")
+            elif cmd == 's':
+                note = input("Note: ")
+                pos_str = f"({position[0]}, {position[1]}, {position[2]}, {position[3]}, {position[4]}, {position[5]})"
+                saved_positions.append(f"{note}: {pos_str}")
+                print(f" Saved!")
+            elif cmd in ['1', '2', '3', '4', '5', '6']:
+                current_servo = int(cmd)
+            elif cmd in ['+', '=']:
+                position[current_servo-1] = min(180, position[current_servo-1] + 5)
+                self.move_single_servo(current_servo, position[current_servo-1], 300)
+            elif cmd == '-':
+                position[current_servo-1] = max(0, position[current_servo-1] - 5)
+                self.move_single_servo(current_servo, position[current_servo-1], 300)
+            elif cmd == ']':
+                position[current_servo-1] = min(180, position[current_servo-1] + 1)
+                self.move_single_servo(current_servo, position[current_servo-1], 200)
+            elif cmd == '[':
+                position[current_servo-1] = max(0, position[current_servo-1] - 1)
+                self.move_single_servo(current_servo, position[current_servo-1], 200)
+
+        if saved_positions:
+            print("\n SAVED POSITIONS:")
+            for pos in saved_positions:
+                print(f"  {pos}")
+
+        self.move_home()
+
+    # Test movement to all tray positions
+    def test_all_trays(self):
+        print("\n TESTING ALL TRAYS")
+        self.move_home()
+        time.sleep(0.5)
+
+        for color in self.RAINBOW_ORDER:
+            print(f"\n {color.upper()} tray...")
+            hover_pos = self.TRAY_HOVER_POSITIONS[color]
+            tray_pos = self.TRAY_POSITIONS[color]
+            
+            self.move_to_position(hover_pos, self.MOVE_TIME_NORMAL)
+            time.sleep(0.3)
+            self.move_to_position(tray_pos, self.MOVE_TIME_SLOW)
             time.sleep(0.5)
-        
-        # Test gripper
-        print("\n🤲 Testing gripper...")
+            self.move_to_position(hover_pos, self.MOVE_TIME_NORMAL)
+            time.sleep(0.3)
+
+        self.move_home()
+        print("\n Tray test complete!")
+
+    def test_all_zones(self):
+        """Test movement to all pickup zones."""
+        print("\n TESTING ALL ZONES")
+        self.move_home()
         self.open_gripper()
         time.sleep(0.5)
-        self.close_gripper()
-        time.sleep(0.5)
-        self.open_gripper()
-        
-        print("\n✅ Movement test complete")
+
+        for zone_num in sorted(self.PICKUP_ZONES.keys()):
+            zone = self.PICKUP_ZONES[zone_num]
+            print(f"\n  Zone {zone_num}...")
+            
+            # Move with gripper open
+            h1, h2, h3, h4, h5, _ = zone['hover']
+            self.move_to_position((h1, h2, h3, h4, h5, self.GRIPPER_OPEN), self.MOVE_TIME_NORMAL)
+            time.sleep(0.3)
+            
+            p1, p2, p3, p4, p5, _ = zone['pickup']
+            self.move_to_position((p1, p2, p3, p4, p5, self.GRIPPER_OPEN), self.MOVE_TIME_SLOW)
+            time.sleep(0.3)
+            
+            self.close_gripper()
+            time.sleep(0.3)
+            
+            self.move_to_position((h1, h2, h3, h4, h5, self.current_position[5]), self.MOVE_TIME_NORMAL)
+            self.open_gripper()
+            time.sleep(0.3)
+
+        self.move_home()
+        print("\n Zone test complete!")
+
+   # Test a single pick and place
+    def test_single_pick_place(self, zone: int = 6, color: str = "neutral"):
+        print(f"\n Test: Zone {zone} → {color} tray")
+        zone_data = self.PICKUP_ZONES[zone]
+        u_center = (zone_data['u_range'][0] + zone_data['u_range'][1]) / 2
+        v_center = (zone_data['v_range'][0] + zone_data['v_range'][1]) / 2
+        return self.pick_and_place(u_center, v_center, color, "test_object")
+
+    def print_statistics(self):
+
+        print("\n STATISTICS")
+        print(f"   Total: {self.operations_count}")
+        print(f"   Success: {self.successful_picks}")
+        print(f"   Failed: {self.failed_picks}")
+        if self.operations_count > 0:
+            rate = (self.successful_picks / self.operations_count) * 100
+            print(f"   Rate: {rate:.1f}%")
 
 
-def test_arm():
-    """Test arm controller functionality."""
-    print("\n" + "=" * 60)
-    print("🤖 DOFBOT ARM CONTROLLER TEST")
-    print("=" * 60 + "\n")
-    
-    # Initialize arm (simulation mode if no port specified)
-    arm = ArmController(port=None)  # Set to 'COM3' or '/dev/ttyUSB0' for real hardware
-    
-    # Connect
-    if not arm.connect():
-        print("❌ Connection failed")
-        return
-    
-    # Test basic movements
-    arm.test_movement()
-    
-    # Test pick and place
-    print("\n" + "=" * 60)
-    print("🧪 TESTING PICK-AND-PLACE")
-    print("=" * 60)
-    
-    pick_position = (15, -10, 5)
-    place_position = arm.get_bin_position('red')
-    
-    print(f"\nPick from: {pick_position}")
-    print(f"Place at:  {place_position} (red bin)")
-    
-    arm.pick_and_place(pick_position, place_position)
-    
-    # Disconnect
-    print("\n")
-    arm.disconnect()
-    
-    print("\n✅ All tests complete!")
 
+# MAIN
 
 if __name__ == "__main__":
-    test_arm()
+    print("\n DOFBOT ARM CONTROLLER TEST")
+    
+    arm = ArmController(simulation=False)
+    
+    if not arm.connect():
+        print(" Failed to connect")
+        exit(1)
+
+    while True:
+        print("\n" + "-" * 40)
+        print("MENU:")
+        print("  1. Test all trays")
+        print("  2. Test all zones")
+        print("  3. Test single pick & place")
+        print("  4. Calibration mode")
+        print("  5. Home position")
+        print("  6. Statistics")
+        print("  7. Quit")
+        print("-" * 40)
+
+        try:
+            choice = input("Select: ").strip()
+        except:
+            break
+
+        if choice == '1':
+            arm.test_all_trays()
+        elif choice == '2':
+            arm.test_all_zones()
+        elif choice == '3':
+            zone = int(input("Zone (1-8): ") or "6")
+            color = input("Color: ") or "neutral"
+            arm.test_single_pick_place(zone, color)
+        elif choice == '4':
+            arm.calibration_mode()
+        elif choice == '5':
+            arm.move_home()
+        elif choice == '6':
+            arm.print_statistics()
+        elif choice == '7':
+            break
+
+    arm.disconnect()
+    print("\n Goodbye!")

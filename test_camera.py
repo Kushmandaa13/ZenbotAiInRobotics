@@ -1,18 +1,10 @@
-#!/usr/bin/env python3
-"""
-Raspberry Pi Camera & Vision Test Script
-Tests camera access, object detection, and classification
-
-Can be run from project root or tests/ directory
-"""
-
 import sys
 import os
 import cv2
 import time
 from datetime import datetime
 
-# Smart path resolution - works from root or tests/ directory
+# Smart path resolution 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = current_dir if os.path.exists(os.path.join(current_dir, 'src')) else os.path.dirname(current_dir)
 src_path = os.path.join(project_root, 'src')
@@ -32,8 +24,6 @@ except ImportError as e:
 
 
 class CameraVisionTester:
-    """Test camera and vision capabilities on Raspberry Pi."""
-    
     def __init__(self, project_root):
         self.test_results = {}
         self.project_root = project_root
